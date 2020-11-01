@@ -1,18 +1,108 @@
 #coding: utf-8
 
-# 1. 导入和设置
-
+# Part 1: 导入
 import torch
-from torch import optim
 from torch import nn, optim
-from model import TextRNN
-from cnews_loader import read_vocab, read_category, process_file
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm.notebook import tnrange
 import numpy as np
+from tensorflow import keras as kr
+np.random.seed(30)
+torch.manual_seed(30)
+torch.cuda.manual_seed(30)
+torch.backends.cudnn.determindistic=True
+torch.backends.cudnn.benchmark = False
+
+print('ready')
 
 train_file = 'cnews.train.txt'
 test_file = 'cnews.test.txt'
 val_file = 'cnews.val.txt'
 vocab_file = 'cnews.vocab.txt'
+
+# 准备数据 （数值向量由文本转入）
+# 读取词汇表
+def read_vocab(vocab_dir):
+    with open(vocab_dir, 'r', encoding='utf-8', errors='ignore') as fp:
+        words = [_.strip() for _ in fp.readlines()]
+    word_to_id = dict(zip(words, range(len(words))))
+    return words, word_to_id
+ 
+ 
+# 读取分类目录，固定
+def read_category():
+    categories = ['体育', '财经', '房产', '家居', '教育', '科技', '时尚', '时政', '游戏', '娱乐']
+    categories = [x for x in categories]
+    cat_to_id = dict(zip(categories, range(len(categories)))) 
+    return categories, cat_to_id
+ 
+ 
+# 将文件转换为id表示
+def process_file(filename, word_to_id, cat_to_id, max_length=600):
+    contents, labels = [], []
+    with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            try:
+                label, content = line.strip().split('\t')
+                if content:
+                    contents.append(list(content))
+                    labels.append(label)
+            except:
+                pass
+    data_id, label_id = [], []
+    for i in range(len(contents)):
+        data_id.append([word_to_id[x] for x in contents[i] if x in word_to_id])#将每句话id化
+        label_id.append(cat_to_id[labels[i]])#每句话对应的类别的id
+    
+    # # 使用keras提供的pad_sequences来将文本pad为固定长度
+    x_pad = kr.preprocessing.sequence.pad_sequences(data_id, max_length)
+    y_pad = kr.utils.to_categorical(label_id, num_classes=len(cat_to_id))  # 将标签转换为one-hot表示
+    #
+    return x_pad, y_pad
+
+# TextRNN Model
+import torch
+from torch import nn
+import torch.nn.functional as F
+ 
+# 文本分类，RNN模型
+class TextRNN(nn.Module):   
+    def __init__(self):
+        super(TextRNN, self).__init__()
+        # 三个待输入的数据
+        self.embedding = nn.Embedding(5000, 64)  # 进行词嵌入
+        # self.rnn = nn.LSTM(input_size=64, hidden_size=128, num_layers=2, bidirectional=True)
+        self.rnn = nn.GRU(input_size=64, hidden_size=128, num_layers=2, bidirectional=True)
+        self.f1 = nn.Sequential(nn.Linear(256,128),
+                                nn.Dropout(0.8),
+                                nn.ReLU())
+        self.f2 = nn.Sequential(nn.Linear(128,10),
+                                nn.Softmax())
+ 
+    def forward(self, x):
+        x = self.embedding(x)
+        x,_ = self.rnn(x)
+        x = F.dropout(x,p=0.8)
+        x = self.f1(x[:,-1,:])
+        return self.f2(x)
+
+
+# 获取文本的类别及其对应id的字典
+categories, cat_to_id = read_category()
+print(categories)
+print(cat_to_id)
+
+
+fpath = open('cnews.vocab.txt', encoding='utf-8', errors='ignore')
+
+#words, word_to_id = read_vocab(fpath) # 获取训练文本中所有出现过的字及其所对应的id
+words, word_to_id = read_vocab('cnews.vocab.txt')
+vocab_size = len(words) #获取字数
+vocab_size2 = len(word_to_id) # 说明有重复文字
+
+print(vocab_size)
+print(vocab_size2)
 
 def train():
     model = TextRNN().cuda()
@@ -20,39 +110,82 @@ def train():
     Loss = nn.MultiLabelSoftMarginLoss()
     # 定义优化器
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
-    best_val_acc = 0
+    # update start
+    EPOCH = 20
+    costs = []
+    early_stop = 0
+    min_loss = float('inf')
+    best_val_acc = 0.
+    # update end
+
     # 训练
     for epoch in range(1000):
-        print('epoch=', epoch)
-        # 分批训练
+        loses = []
+        #print('epoch=', epoch)
+        train_correct, train_total = 0., 0.
+
         for step, (x_batch, y_batch) in enumerate(train_loader):
             x = x_batch.cuda()
             y = y_batch.cuda()
             # 前向传播
-            out = model(x)
-            loss = Loss(out, y)
-            # 反向传播
+            output = model(x)
+            loss = Loss(output, y)
+            losses.append(loss.item())
+            # 梯度清零
             optimizer.zero_grad()
+            # 反向传播
             loss.backward()
-            print('loss=', loss)
+            # 权值更新
             optimizer.step()
+
+            train_pred = torch.argmax(output, 1).data.cpu().numpy()
+            train_label = torch.argmax(b_y, 1).data.cpu().numpy()
+            train_correct += (train_pred == train_label).sum()
+            train_total += len(train_label)
+        meanloss = np.mean(losses)
+        costs.append(meanloss)
+
+            #------------------------------------------------------------------------------
             # 计算准确率
-            accuracy = np.mean((torch.argmax(out, 1) == torch.argmax(y, 1)).cpu().numpy())
-            print('accuracy:', accuracy)
+            #accuracy = np.mean((torch.argmax(out, 1) == torch.argmax(y, 1)).cpu().numpy())
+            #print('accuracy:', accuracy)
         # 对模型进行验证
-        if (epoch+1) % 10 == 0:
-            for step, (x_batch, y_batch) in enumerate(val_loader):
-                x = x_batch.cuda()
-                y = y_batch.cuda()
-                out = model(x)
-                accuracy = np.mean((torch.argmax(out, 1) == torch.argmax(y, 1)).cpu().numpy())
-                # 保存最好模型
-                if accuracy > best_val_acc:
-                    torch.save(model, "model.pkl")
-                    best_val_acc = accuracy
-                    print('model.pkl saved')
-                    print('accuracy:', accuracy)
+        if epoch % 2 == 0:
+            # 训练集准确率
+            train_acc = train_correct / train_total
+            textrnn.train(False)
+            # 验证集预测
+            val_correct, val_total = 0., 0.
+            for i, (x_v, y_v) in enumerate(valloader):
+                x_v, y_v = x_v.to(device), y_v.to(device)
+                val_output = textrnn(x_v.to(device))
+
+                # 获取预测的label，并转为数组
+                val_pred = torch.argmax(val_output, 1)
+                val_pred_arr = val_pred.data.cpu().numpy()
+                y_val_arr = torch.argmax(y_v, 1).data.cpu().numpy()
+                # 准确率
+                val_correct += (val_pred_arr == y_val_arr).sum()
+                val_total += len(y_val_arr)
+            val_acc = val_correct / val_total
+            print("==>epoch:{} 训练集loss:{:.4f} 训练集accuracy:{:.2f}% 验证集accuracy:{:.2f}%".
+            format(epoch, meanloss, train_acc * 100, val_acc * 100))
+            textrnn.train(True)
+
+            # 根据准确率 保存模型
+            if val_acc > best_acc:
+                best_acc = val_acc
+                torch.save(textrnn, 'textRNN1.pt')
+    #  早停法
+        if meanloss < min_loss:
+            min_loss = meanloss
+            early_stop = 0
+        else:
+            early_stop += 1
+        if early_stop > 5:
+            print(f"loss连续{epoch}个epoch未降低, 停止循环")
+            break
+
     return model
 
 
@@ -62,12 +195,17 @@ print(categories)
 words, word_to_id = read_vocab('cnews.vocab.txt') # 获取训练文本中所有出现过的字及其所对应的id
 print(words)
 
+
 # 获取训练数据每个字的id和对应标签的one-hot形式
 x_train, y_train = process_file(train_file, word_to_id, cat_to_id, 100)
 print('x_train=', x_train)
 x_val, y_val = process_file(val_file, word_to_id, cat_to_id, 100)
 
 # GPU setting
+textrnn = TextRNN()
+device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
+textrnn.to(device)
+
 import torch.utils.data as Data
 cuda = torch.device('cuda')
 x_train, y_train = torch.LongTensor(x_train), torch.Tensor(y_train)
